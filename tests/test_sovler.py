@@ -61,7 +61,6 @@ def test_registerSolver():
     nose.tools.assert_equal(seed, '\x9b\x9c\xffpAAAA')
 
 
-
 if __name__ == '__main__':
     test_memorySolver()
     test_registerSolver()

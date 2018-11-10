@@ -7,19 +7,13 @@ Create By  : Bluecake
 Description: Automatically Fuzzing Module
 """
 
-from multiprocessing import Process, Queue
+from multiprocessing import Queue
 from termcolor import colored
-from pwn import log, context
-from copy import deepcopy
-from emulator import *
-from guesser import *
 from solver import *
 from triton import *
-import subprocess
 import ctypes
 import random
 import shutil
-import string
 import gc
 import re
 
@@ -32,26 +26,26 @@ class Fuzzer(object):
         guesser: A Guesser object, provide support for function analysis
         solver: A InputSolver object, provide support for contraints solving
         
-        bin_root: A string, directory of execuable binary file
+        bin_root: A string, directory of executable binary file
         config_file: fuzz state log file
-        timeout: The fuzzer process will restart when timeout 
+        timeout: The fuzzer process will restart when timeout is reached
     """
     
-    def __init__(self, binary, logv=None):
-        """Class contructor
+    def __init__(self, binary_path):
+        """Class constructor
 
         Args:
-            binary: path of binary file
+            binary_path: path of binary file
         """
-        
-        self.logv = logv
 
-        if not os.path.exists(binary):
-            log.warn('binary file %s not exists' % binary)
-            self.binary = ''
+        self.logger = LogUtil.get_logger()
 
-        bin_name = os.path.basename(binary)
-        self.bin_root = os.path.dirname(os.path.abspath(binary))
+        if not os.path.exists(binary_path):
+            self.logger.warn('binary file %s not exists' % binary_path)
+            return
+
+        bin_name = os.path.basename(binary_path)
+        self.bin_root = os.path.dirname(os.path.abspath(binary_path))
         self.fuzz_dir = os.path.join(self.bin_root, bin_name + '_symbol_fuzzer')
         if not os.path.exists(self.fuzz_dir):
             os.mkdir(self.fuzz_dir)
@@ -66,34 +60,31 @@ class Fuzzer(object):
         self.timeout = 180
         self.running = True
         self.bridge = Queue()
-        self.circle = 500    # can be as big as possible
+        self.circle = 500    # seconds, can be longer
         self.cache_dir = ''
-        self.chkramdisk()
 
-    def chkramdisk(self):
+        # if run with root, init ram disk
+        if os.geteuid() == 0:
+            self.create_ramdisk(1)
 
+    def create_ramdisk(self, size):
         cache_dir = '/tmp/fuzz_ramdisk'
         if os.path.exists(cache_dir):
             self.cache_dir = cache_dir
             return 
 
-        user = subprocess.check_output('whoami').strip('\n')
-        if user != 'root':
-            return
-        
         try:
             os.makedirs(cache_dir) 
             if os.path.exists(cache_dir):
                 self.cache_dir = cache_dir
 
-            os.system('mount -t tmpfs -o size=10G tmpfs ' + cache_dir)
+            os.system('mount -t tmpfs -o size=%dG tmpfs %s' % (size, cache_dir))
 
         except Exception as e:
             print e
-            return
 
     def save_state(self):
-        log.info('Fuzzer save_state called')
+        self.logger.info('Fuzzer save_state called')
 
         data1 = (self.solve_record, self.tried_seeds)
         data2 = (self.seed_tree, self.atoi_solve)
@@ -101,7 +92,7 @@ class Fuzzer(object):
         open(self.config_file, 'wb').write(repr((data1, data2, data3)))
 
     def load_state(self):
-        log.info("Fuzzer load_state called")
+        self.logger.info("Fuzzer load_state called")
 
         if os.path.exists(self.config_file):
             data = open(self.config_file).read()
@@ -171,13 +162,10 @@ class Fuzzer(object):
         dumpfile_path = os.path.join('/tmp', self.cache_dir, dumpfile_filename)
         return dumpfile_path
 
-    def initEmulator(self, seed):
+    def init_emulator(self, seed):
         base_seed = self.get_base(seed)
         dumpfile_path = self.getDumpfile(base_seed)  
-        # emulator = Emulator(self.binary, dumpfile_path)
-        emulator = Debugger(self.binary, dumpfile_path)
-        emulator.snapshot(base_seed)
-        emulator.initialize()
+        emulator = Debugger(EmuConstant.MODE_ELF, binary=self.binary, dumpfile=dumpfile_path)
         emulator.show_inst = False
         emulator.show_output = False
         emulator.set_input(seed[len(base_seed):])
@@ -261,7 +249,7 @@ class Fuzzer(object):
 
     def explore_atoi(self, breakpoint, retaddr, seed):
 
-        emulator = self.initEmulator(seed)
+        emulator = self.init_emulator(seed)
 
         def read_before(emulator, fd, addr, length):
             if emulator.stdin == '':
@@ -276,7 +264,7 @@ class Fuzzer(object):
                     while emulator.getpc() != retaddr:
                         emulator.process()
 
-                    log.info(colored('Start symbolizing atoi result register eax', 'green'))
+                    self.logger.info(colored('Start symbolizing atoi result register eax', 'green'))
                     emulator.symbolize_reg('eax')
 
                 emulator.process()
@@ -386,7 +374,7 @@ class Fuzzer(object):
         Args:
             seed: initial input of the program
         """
-        emulator = self.initEmulator(seed)
+        emulator = self.init_emulator(seed)
 
         def is_symbolize(emulator, offset):
             return True
@@ -425,7 +413,7 @@ class Fuzzer(object):
         
         try:
             while emulator.running:
-                if self.isJmpInst(emulator.lastInstType):
+                if self.isJmpInst(emulator.last_inst_type):
                     # log.info('Detect branch at %s' % hex(emulator.getpc()))
 
                     if emulator.sys_read:
@@ -453,7 +441,7 @@ class Fuzzer(object):
                             result.extend(res)
                             return result
 
-                elif emulator.lastInstType == OPCODE.CALL:
+                elif emulator.last_inst_type == OPCODE.CALL:
                     # log.info('guessing function at ' + hex(emulator.last_pc))
                     if self.guesser.guessFunc(emulator.getpc()) == FUNCTYPE.FUNC_atoi:
                         state = hash(tuple(path))
@@ -651,7 +639,7 @@ class Fuzzer(object):
         """Start Fuzzing
         
         Since there is a memory leaking problem in Triton, 
-        so I fix it with create new fuzzing process contiually.
+        so I fix it with create new fuzzing process continuously.
         """
 
         if not self.binary:

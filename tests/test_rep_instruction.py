@@ -11,11 +11,11 @@ from triton import ARCH
 
 
 def test_rep_movsd_x86():
-     insts = "mov ecx, 5; mov edi, 0x1000; mov esi, 0x2000; rep movsd [edi], [esi]; mov eax, 0"
-     emu = Debugger(EmuConstant.MODE_CODE, arch=ARCH.X86, code=insts, assembly=True, code_start=0x3000)
-     emu.set_memory(0x1000, "a" * 50)
-     emu.set_memory(0x2000, "b" * 50)
-     emu.debug()
+    insts = "mov ecx, 5; mov edi, 0x1000; mov esi, 0x2000; rep movsd [edi], [esi]; mov eax, 0"
+    emulator = Emulator(EmuConstant.MODE_CODE, arch=ARCH.X86, code=insts, assembly=True, code_start=0x3000)
+    emulator.set_memory(0x1000, "a" * 50)
+    emulator.set_memory(0x2000, "b" * 50)
+
 
 
 def test_rep_movsd_x64():

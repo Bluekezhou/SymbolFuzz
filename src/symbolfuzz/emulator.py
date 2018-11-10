@@ -95,6 +95,7 @@ class Emulator(Basic):
         self.last_inst_type = OPCODE.JMP
         self.memory_cache = list()
         self.memAccessCheck = False
+        self.logger = LogUtil.get_logger()
         self.before_process_callbacks = []
         self.after_process_callbacks = []
 
@@ -124,10 +125,7 @@ class Emulator(Basic):
             self.root_dir = os.path.dirname(__file__)
 
             elf = ELF(binary)
-            if elf.get_machine_arch() == ['x86', 'i386']:
-                self.arch = ARCH.X86
-            elif elf.get_machine_arch() == ['x86_64', 'amd64']:
-                self.arch = ARCH.X86_64
+            self.arch = get_arch(elf)
 
             self.assembly_cache_file = "/tmp/AssemblyCache.txt"
             if os.path.exists(self.assembly_cache_file):
@@ -172,8 +170,12 @@ class Emulator(Basic):
         return self.running
 
     def snapshot(self, seed='', dumpfile=''):
-        """Automatically take memory snapshot on the entrypoint of main()
+        """Automatically take memory snapshot on the entry of main()
             or other point
+
+        Args:
+            seed: input data, works as stdin input
+            dumpfile: memory dumpfile path
         """
         if dumpfile == '':
             dumpfile = self.dumpfile
@@ -201,7 +203,7 @@ class Emulator(Basic):
 
         try:
             p = process(self.binary)
-            log.info('try to dump memory with seed ' + repr(seed))
+            self.logger.info('try to dump memory with seed ' + repr(seed))
             # gdb.attach(p)
             if seed:
                 p.send(seed)
@@ -255,7 +257,7 @@ class Emulator(Basic):
         """Retrieve current PC address
 
         Return:
-            uint32 or uint64, current pc address
+            current pc address
         """
         if self.arch in EmuConstant.SUPPORT_ARCH:
             return self.getreg(EmuConstant.RegisterTable[self.arch]['pc'])
@@ -272,12 +274,10 @@ class Emulator(Basic):
         Return:
             A string, stored in targeted memory
         """
-        Triton = self.triton
-
         s = ""
         index = 0
-        while Triton.getConcreteMemoryValue(address + index):
-            c = chr(Triton.getConcreteMemoryValue(address + index))
+        while self.triton.getConcreteMemoryValue(address + index):
+            c = chr(self.triton.getConcreteMemoryValue(address + index))
             if c == '\x00': 
                 break
             s += c
@@ -333,7 +333,7 @@ class Emulator(Basic):
 
             self.triton.setConcreteMemoryAreaValue(address, content)
 
-    def getuint32(self, addr):
+    def get_uint32(self, addr):
         """Retrieve uint32 value of target address
 
         Args:
@@ -346,7 +346,7 @@ class Emulator(Basic):
         self.triton.concretizeMemory(mem)
         return self.triton.getConcreteMemoryValue(mem)
 
-    def getuint64(self, addr):
+    def get_uint64(self, addr):
         """Retrieve uint64 value of target address
         
         Args:
@@ -380,7 +380,7 @@ class Emulator(Basic):
                 bincode = asm(code, arch=EmuConstant.SUPPORT_ARCH[self.arch])
                 self.assembly_cache[self.arch][code] = bincode
 
-                with open(self.assembly_cache, 'wb') as f:
+                with open(self.assembly_cache_file, 'wb') as f:
                     f.write(repr(self.assembly_cache))
 
             return self.assembly_cache[self.arch][code]
@@ -388,14 +388,19 @@ class Emulator(Basic):
         else:
             return asm(code, arch=EmuConstant.SUPPORT_ARCH[self.arch])
 
+    def fake_process(self, code):
+        asm_code = self.asm(code)
+        instruction = Instruction()
+        instruction.setOpcode(asm_code)
+        instruction.setAddress(0)
+        self.triton.processing(instruction)
+
     def load_dump(self):
         """Recover memory, registers with dumpfile"""
 
-        Triton = self.triton
-
         # Open the dump
         fd = open(self.dumpfile)
-        log.debug('load memory dumpfile ' + self.dumpfile)
+        self.logger.debug('load memory dumpfile ' + self.dumpfile)
         data = eval(fd.read())
         fd.close()
 
@@ -404,10 +409,8 @@ class Emulator(Basic):
         mems = data[1]
         gs_8 = data[2]
 
-        context.arch = 'i386'
-
         # Load memory into memory_cache
-        log.debug('Define memory areas')
+        self.logger.debug('Define memory areas')
         for mem in mems:
             start = mem['start']
             end = mem['end']
@@ -421,26 +424,35 @@ class Emulator(Basic):
                     'name': name
                 })
 
-        # Make sure to restore gs register first
-        self.setreg('gs', regs['gs'])
-        for i in range(7):
-            log.debug('Restore gs[0x%x]' % (i*4))
-            v = pack.u32(self.get_memory(gs_8 + i*4, 4))
-            write_gs = ['mov eax, %s' % hex(v), 'mov gs:[%d], eax' % (i*4)]
-            for inst in write_gs:
-                asm_code = self.asm(inst)
-                instruction = Instruction()
-                instruction.setOpcode(asm_code)
-                instruction.setAddress(0)
-                Triton.processing(instruction)
+        if self.arch == ARCH.X86:
+            context.arch = 'i386'
+
+            # Make sure to restore gs register first
+            self.setreg('gs', regs['gs'])
+            for i in range(7):
+                self.logger.debug('Restore gs[0x%x]' % (i*4))
+                v = self.get_uint32(gs_8 + i*4)
+                write_gs = ['mov eax, %s' % hex(v), 'mov gs:[%d], eax' % (i*4)]
+                for inst in write_gs:
+                    self.fake_process(inst)
+
+        elif self.arch == ARCH.X86_64:
+            context.arch = 'amd64'
+
+            # Make sure to restore gs register first
+            self.setreg('gs', regs['gs'])
+            for i in range(7):
+                self.logger.debug('Restore gs[0x%x]' % (i*8))
+                v = self.get_uint64(gs_8 + i*8)
+                write_gs = ['mov rax, %s' % hex(v), 'mov gs:[%d], rax' % (i*8)]
+                for inst in write_gs:
+                    self.fake_process(inst)
 
         # Load registers into the triton
-        log.debug('Define registers')
+        self.logger.debug('Define registers')
         for reg, value in regs.items():
-            log.debug('Load register ' + reg)
+            self.logger.debug('Load register ' + reg)
             self.setreg(reg, value)
-
-        return       
 
     def memory_caching(self, triton, mem):
         """Callback: Speed up the procedure of load_dump"""
@@ -652,17 +664,16 @@ class Emulator(Basic):
     def init_with_binary(self):
         """Prepare everything before starting emulator"""
 
-        Triton = self.triton = TritonContext()
-        Triton.setArchitecture(self.arch)
+        self.triton.setArchitecture(self.arch)
 
         # Define symbolic optimizations
-        Triton.enableMode(MODE.ALIGNED_MEMORY, True)
-        Triton.enableMode(MODE.ONLY_ON_SYMBOLIZED, True)
+        self.triton.enableMode(MODE.ALIGNED_MEMORY, True)
+        self.triton.enableMode(MODE.ONLY_ON_SYMBOLIZED, True)
 
         # Define internal callbacks.
-        Triton.addCallback(self.memoryCaching, CALLBACK.GET_CONCRETE_MEMORY_VALUE)
+        self.triton.addCallback(self.memory_caching, CALLBACK.GET_CONCRETE_MEMORY_VALUE)
         
-        if self.dumpfile == '':
+        if not self.dumpfile:
             file_hash = md5(self.binary)            
             # Get dumpfile from entry of main()
             self.dumpfile = '/tmp/%s_%s_dump.bin' % (os.path.basename(self.binary), file_hash)
@@ -671,14 +682,6 @@ class Emulator(Basic):
             self.snapshot()
 
         self.load_dump()
-        self.last_inst_type = OPCODE.JMP
-
-        self.syshook.add_callback("read", self.callback_read)
-        self.syshook.add_callback("write", self.callback_write)
-        self.syshook.add_callback("exit", self.callback_exit)
-        self.syshook.add_callback("exit_group", self.callback_exit)
-        self.syshook.add_callback("fstat64", self.callback_fstat64)
-        self.syshook.add_callback("unsupported", self.callback_unsupported)
 
     def getSyscallRegs(self):
         """Retrieve args for syscall instruction
@@ -732,7 +735,7 @@ class Emulator(Basic):
         """ Check whether target memory is symbolized
 
         Args:
-            addr: A uint32, memory address
+            addr: Memory address
 
         Return:
             true, if target memory is symbolized
@@ -740,7 +743,7 @@ class Emulator(Basic):
         return self.triton.isMemorySymbolized(addr)
 
     def isTainted(self, target):
-        """ Check whether target data is influenced
+        """ Check whether target data is tainted
 
         Args:
             target: memory address list or register name
@@ -772,50 +775,6 @@ class Emulator(Basic):
         inst.setAddress(0)
         self.triton.processing(inst)
 
-    # def patch_repeat_mov(self, instruction):
-    #     if instruction.getType() == OPCODE.MOVSD:
-    #         """
-    #         For unknown reason, triton didn't work when meets instruction
-    #         like "rep mov", So I did some patch by hand
-    #         """
-    #         ecx = self.getreg('ecx')
-    #         if ecx > 0x1000:
-    #             ecx = 0x1000
-    #         self.instrument("push eax")
-    #         log.debug('try to patch "rep movsd"')
-    #         for i in range(ecx):
-    #             gadgets = ["mov eax, dword ptr [esi]",
-    #                         "mov dword ptr [edi], eax",
-    #                         "add esi, 4",
-    #                         "add edi, 4"]
-    #             for gadget in gadgets:
-    #                 self.instrument(gadget)
-    #
-    #         self.instrument("pop eax")
-    #         self.setpc(self.getpc() + instruction.getSize())
-    #
-    #         return self.getpc()
-    #
-    #     elif instruction.getType() == OPCODE.MOVSB:
-    #
-    #         log.debug('try to patch "rep movsb"')
-    #         ecx = self.getreg('ecx')
-    #         if ecx > 0x1000:
-    #             ecx = 0x1000
-    #         self.instrument("push eax")
-    #
-    #         for i in range(ecx):
-    #             gadgets = ["mov al, byte ptr [esi]",
-    #                         "mov byte ptr [edi], al",
-    #                         "add esi, 1",
-    #                         "add edi, 1"]
-    #             for gadget in gadgets:
-    #                 self.instrument(gadget)
-    #
-    #         self.instrument("pop eax")
-    #         self.setpc(self.getpc() + instruction.getSize())
-    #         return self.getpc()
-
     def check_dead_loop(self, *args):
         if self.getpc() == self.last_pc:
             self.inst_loop += 1
@@ -832,13 +791,12 @@ class Emulator(Basic):
     def add_after_process_callback(self, handler):
         self.after_process_callbacks.append(handler)
 
-    # def enable_triton_patch(self):
-    #     self.add_before_process_callback(self.patch_repeat_mov)
-
-    """
-    Process only an instruction
-    """
     def process(self):
+        """Emulate executing an instruction
+
+        Returns:
+            next instruction address
+        """
 
         if not self.running:
             if self.memoryAccessError:
@@ -858,7 +816,6 @@ class Emulator(Basic):
         for handler in self.before_process_callbacks:
             handler(instruction)
 
-        # Process
         self.triton.processing(instruction)
         if self.show_inst:
             print(instruction)
@@ -884,33 +841,33 @@ class Emulator(Basic):
             self.setpc(pc + instruction.getSize())
 
         elif instruction.getType() == OPCODE.HLT:
-            log.debug("Program stopped [call hlt]")
+            self.logger.debug("Program stopped [call hlt]")
             self.running = False
             self.setpc(0)
 
         # Deal with instruction exception
-        elif instruction.getType() == OPCODE.RET \
-                or instruction.getType() == OPCODE.CALL\
-                or instruction.getType() == OPCODE.JMP:
+        # elif instruction.getType() == OPCODE.RET \
+        #         or instruction.getType() == OPCODE.CALL\
+        #         or instruction.getType() == OPCODE.JMP:
 
-            new_pc = self.getpc()
-            text_start = self.memory_cache[0]['start']
-            text_end = self.memory_cache[0]['start'] + self.memory_cache[0]['size']
+            # new_pc = self.getpc()
+            # text_start = self.memory_cache[0]['start']
+            # text_end = self.memory_cache[0]['start'] + self.memory_cache[0]['size']
+            #
+            # for m in self.memory_cache:
+            #     if 'vdso' in m['name']:
+            #         vdso_start = m['start']
+            #         vdso_end = m['start'] + m['size']
+            #         break
+            #
+            # if not self.is_address(new_pc):
+            #     raise IllegalPcException(self.arch, new_pc)
 
-            for m in self.memory_cache:
-                if 'vdso' in m['name']:
-                    vdso_start = m['start']
-                    vdso_end = m['start'] + m['size']
-                    break
-
-            if not self.is_address(new_pc):
-                raise IllegalPcException(self.arch, new_pc)
-
-            if not ((text_start <= new_pc <= text_end) or (vdso_start <= new_pc <= vdso_end)):
-                log.info('.text [%s-%s], vdso [%s-%s], new_pc is %s' %
-                         (hex(text_start), hex(text_end), hex(vdso_start), hex(vdso_end), hex(new_pc)))
-
-                raise IllegalInstException(self.arch, new_pc)
+            # if not ((text_start <= new_pc <= text_end) or (vdso_start <= new_pc <= vdso_end)):
+            #     log.info('.text [%s-%s], vdso [%s-%s], new_pc is %s' %
+            #              (hex(text_start), hex(text_end), hex(vdso_start), hex(vdso_end), hex(new_pc)))
+            #
+            #     raise IllegalInstException(self.arch, new_pc)
         '''
         elif instruction.getType() == OPCODE.RET \
                 or instruction.getType() == OPCODE.CALL:
@@ -926,6 +883,12 @@ class Emulator(Basic):
         pc = self.getpc()
         
         return pc
+
+    def process_n_instruction(self, steps):
+        result = None
+        for i in range(steps):
+            result = self.process()
+        return result
 
 
 class IllegalPcException(Exception):

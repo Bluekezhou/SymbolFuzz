@@ -2,6 +2,7 @@ from triton import ARCH
 
 
 class EmuConstant:
+    """A basic class that can provide some constant data """
     def __init__(self):
         pass
 

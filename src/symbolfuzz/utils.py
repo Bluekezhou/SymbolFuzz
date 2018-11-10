@@ -1,11 +1,13 @@
 import logging
 import hashlib
+import sys
+from triton import ARCH
 
 
 # Define basic exception class
 class UnsupportedArchException(Exception):
     def __init__(self, arch):
-        Exception.__init__(self, "Architecture %s is not supported yet" % arch)
+        Exception.__init__(self, "Architecture %s is not supported yet" % str(arch))
 
 
 class NotImplementedException(Exception):
@@ -15,23 +17,42 @@ class NotImplementedException(Exception):
 
 class UnknownEmulatorMode(Exception):
     def __init__(self, arch):
-        Exception.__init__(self, "Unknown emulator mode")
+        Exception.__init__(self, "Unknown emulator mode " + str(arch))
 
 
-# Define some basic functions
-def get_logger(module_name, log_level=logging.DEBUG):
-    global gLoglevel
+class LogUtil:
+    __logger = None
+    __log_handler = None
 
-    fmt = '{} %(levelname)s: %(message)s'.format(module_name)
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(logging.Formatter(fmt))
-    logger = logging.getLogger(module_name)
-   
-    logger.setLevel(log_level)
-    if not logger.handlers:
-        logger.addHandler(console_handler)
+    @classmethod
+    def init_log(cls, logfile=None, logger_name=None):
+        if logfile is sys.stdout or not logfile:
+            cls.__logger = logging.getLogger("stdout")
+            cls.__log_handler = logging.StreamHandler(sys.stdout)
+        elif logfile and not logger_name:
+            cls.__logger = logging.getLogger(logfile)
+            cls.__log_handler = logging.StreamHandler(open(logfile, "a"))
+        else:
+            cls.__logger = logging.getLogger(logger_name)
+            cls.__log_handler = logging.StreamHandler(open(logfile, "a"))
 
-    return logger
+        cls.__logger.setLevel(logging.INFO)
+
+        format_str = "[%(asctime)s file=%(filename)s line=%(lineno)d %(levelname)s] %(message)s"
+        formatter = logging.Formatter(format_str)
+        cls.__log_handler.setFormatter(formatter)
+        cls.__logger.addHandler(cls.__log_handler)
+
+    @classmethod
+    def close(cls):
+        if cls.__log_handler:
+            cls.__log_handler.close()
+
+    @classmethod
+    def get_logger(cls):
+        if not cls.__logger:
+            cls.init_log(sys.stdout)
+        return cls.__logger
 
 
 def title(msg, obj=None, length=70, fill='='):
@@ -39,7 +60,7 @@ def title(msg, obj=None, length=70, fill='='):
     msg = ' ' + msg + ' '
     msg = fill * ((length-len(msg))/2) + msg
     print msg.ljust(length, fill)
-    if obj != None:
+    if obj is not None:
         print obj
 
 
@@ -61,7 +82,8 @@ def md5(stream, is_file=True):
     """ Generate md5 for file or string """
     md5 = hashlib.md5()
     if is_file:
-        data = open(stream).read()
+        with open(stream) as f:
+            data = f.read()
         md5.update(data)
     else:
         md5.update(stream)
@@ -83,6 +105,21 @@ def str2int(data):
         return int(data, 16)
     except ValueError:
         return int(data, 10)
+
+
+def get_arch(elf):
+    """translate ELF.get_machine_arch() to triton.ARCH
+
+    Args:
+        elf: instance of ELF class
+
+    Returns:
+        an integer, supported triton ARCH
+    """
+    if elf.get_machine_arch() in ['x86', 'i386']:
+        return ARCH.X86
+    elif elf.get_machine_arch() in ['x86_64', 'amd64']:
+        return ARCH.X86_64
 
 
 def connectPycharm(ip, port=4444):

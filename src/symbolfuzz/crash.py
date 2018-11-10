@@ -7,7 +7,9 @@ Create By: Bluecake
 Description: Some constants to describe crash
 """
 
-NO_CRASH = 0
-CONTROL_PC = 1
-SHELLCODE = 2
+
+class STATUS:
+    NO_CRASH = 0
+    CONTROL_PC = 1
+    SHELLCODE = 2
 
