@@ -333,7 +333,7 @@ class Signature:
             return self.matched[sign_hash]
 
         score = 0
-        name = "UNK_FUNCTION"
+        name = None
 
         for i, func in enumerate(self.functions):
             print("Searching %s, Process: %%%f" % (func, float(i)/len(self.functions)*100))

@@ -8,23 +8,38 @@ Description: A class to recognize library function
 """
 
 from pwn import ELF
-from emulator import Emulator, EmuConstant
+import os
+from signature import Signature
 
 
 class Recognizer(object):
 
-    def __init__(self, binary, seed=""):
+    def __init__(self, binary):
         self.binary = binary
-        self.emulator = Emulator(EmuConstant.MODE_ELF, binary=binary)
         self.elf = ELF(binary)
         self.address_info = {}
-        for k in self.elf.plt:
-            self.address_info[self.elf.plt[k]] = {
-                "type": "plt",
-                "name": k
-            }
+        if not self.is_static():
+            pass
+        else:
+            self.lib_sign = None
+            self.target_sign = None
 
-    def is_static_compiled(self):
+        self.prepare()
+
+    def prepare(self):
+        if not self.is_static():
+            for k in self.elf.plt:
+                self.address_info[self.elf.plt[k]] = {
+                    "type": "plt",
+                    "name": k
+                }
+        else:
+            work_dir = os.path.dirname(__file__)
+            sign_file = os.path.join(work_dir, "signature/signature")
+            self.lib_sign = Signature(sign_file)
+            self.target_sign = Signature(self.binary)
+
+    def is_static(self):
         """ Check whether target program is compiled statically
 
         Returns:
@@ -69,17 +84,18 @@ class Recognizer(object):
         Returns:
             name of function, if recognized, otherwise None
         """
-        pass
+        if entry in self.address_info:
+            return self.address_info[entry]["name"]
 
-    def get_call_func(self, pc):
-        """ Get called function name, like call 0x8048020, actually
-        it's calling atoi()
+        elif self.is_static():
+            func_sign = self.target_sign.get_sign(entry)
+            name = self.lib_sign.match_sign(func_sign)
 
-        Args:
-            pc: address of call instruction
+            result = {
+                "type": "func",
+                "name": name
+            }
+            self.address_info[entry] = result
+            return name
 
-        Returns:
-            name of called function if recognized, otherwise None
-        """
-
-        pass
+        return None
