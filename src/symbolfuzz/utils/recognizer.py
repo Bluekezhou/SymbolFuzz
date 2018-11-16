@@ -9,7 +9,7 @@ Description: A class to recognize library function
 
 from pwn import ELF
 import os
-from signature import Signature
+from symbolfuzz.utils.signature import Signature
 
 
 class Recognizer(object):
@@ -18,9 +18,7 @@ class Recognizer(object):
         self.binary = binary
         self.elf = ELF(binary)
         self.address_info = {}
-        if not self.is_static():
-            pass
-        else:
+        if self.is_static():
             self.lib_sign = None
             self.target_sign = None
 
@@ -45,7 +43,7 @@ class Recognizer(object):
         Returns:
             boolean, True or False
         """
-        if not self.elf.got:
+        if not self.elf.plt:
             return True
         else:
             return False
@@ -98,4 +96,9 @@ class Recognizer(object):
             self.address_info[entry] = result
             return name
 
+        result = {
+            "type": "func",
+            "name": None
+        }
+        self.address_info[entry] = result
         return None

@@ -6,9 +6,9 @@ Create by  : Bluecake
 """
 
 from triton import ARCH
-from pwn import log
-from utils import *
-from basic import *
+from basic import Basic
+from symbolfuzz.utils.exception import *
+from symbolfuzz.utils.utils import LogUtil
 
 
 class Syscall(Basic):
@@ -30,11 +30,12 @@ class Syscall(Basic):
             arch: Program architecture. Right now, only x86 is supported.
         """
         super(Syscall, self).__init__()
+        self.logger = LogUtil.get_logger()
 
         if arch == ARCH.X86:
-            import i386_syscall as SYS
+            from symbolfuzz.core import i386_syscall as SYS
         elif arch == ARCH.X86_64:
-            import amd64_syscall as SYS
+            from symbolfuzz.core import amd64_syscall as SYS
         else:
             raise UnsupportedArchException(arch)
 
@@ -51,14 +52,14 @@ class Syscall(Basic):
                 self.systable[int(value)] = {"handler": None, "name": str(value)}
 
     def syscall_exit(self, exit_value, *args):
-        log.debug('[SYS_exit] exit(%d)' % exit_value)
+        self.logger.debug('[SYS_exit] exit(%d)' % exit_value)
         if 'exit' in self.callbacks:
             return self.callbacks['exit'](exit_value)
         else:
             return 0
 
     def syscall_exit_group(self, exit_value, *args):
-        log.debug('[SYS_exit] exit_group(%d)' % exit_value)
+        self.logger.debug('[SYS_exit] exit_group(%d)' % exit_value)
         if 'exit_group' in self.callbacks:
             return self.callbacks['exit'](exit_value)
         else:
@@ -66,23 +67,22 @@ class Syscall(Basic):
 
     def syscall_read(self, fd, addr, length, *args): 
 
-        log.debug('[SYS_read] fd: %d, addr: 0x%x, length: %x' % (fd, addr, length))
+        self.logger.debug('[SYS_read] fd: %d, addr: 0x%x, length: %x' % (fd, addr, length))
         if 'read' in self.callbacks:
             return self.callbacks['read'](fd, addr, length)
         else:
             return 0
 
-
     def syscall_write(self, fd, addr, length, *args):
 
-        log.debug('[SYS_write] fd: %d, addr: 0x%x, length: %x' % (fd, addr, length))
+        self.logger.debug('[SYS_write] fd: %d, addr: 0x%x, length: %x' % (fd, addr, length))
         if 'write' in self.callbacks:
             return self.callbacks['write'](fd, addr, length)
         else:
             return 0
 
     def syscall_fstat64(self, fd, stat_buf, *args):
-        log.debug('[SYS_fstat64] fd: %d, stat_buf: 0x%x' % (fd, stat_buf))
+        self.logger.debug('[SYS_fstat64] fd: %d, stat_buf: 0x%x' % (fd, stat_buf))
         if 'fstat64' in self.callbacks:
             return self.callbacks['fstat64'](fd, stat_buf)
         else:
@@ -91,17 +91,17 @@ class Syscall(Basic):
     def syscall(self, sysnum, *args):
 
         if self.systable.has_key(sysnum):
-            if self.systable[sysnum]["handler"] != None:
-                log.debug('Emulate syscall ' + self.systable[sysnum]["name"])
+            if self.systable[sysnum]["handler"] is not None:
+                self.logger.debug('Emulate syscall ' + self.systable[sysnum]["name"])
                 return self.systable[sysnum]["handler"](*args) 
             else:
-                log.debug('No support for syscall ' + self.systable[sysnum]["name"])
+                self.logger.debug('No support for syscall ' + self.systable[sysnum]["name"])
                 if 'unsupported' in self.callbacks:
                     return self.callbacks['unsupported'](*args)
                 else:
                     return 0
         else:
-            log.debug('Unknown syscall ' + str(sysnum))
+            self.logger.debug('Unknown syscall ' + str(sysnum))
             if 'unknown' in self.callbacks:
                 return self.callbacks['unknown'](*args)
             else:

@@ -8,11 +8,12 @@ Description: A class to get function signature
 """
 
 from capstone import Cs, CS_ARCH_X86, CS_MODE_32, CS_MODE_64
+from symbolfuzz.utils.utils import get_arch, md5, LogUtil
+from symbolfuzz.utils.exception import *
 import os
 import json
 from pwn import ELF
 from triton import ARCH
-from utils import get_arch, UnsupportedArchException, md5, LogUtil
 import subprocess
 import re
 import copy
@@ -325,10 +326,7 @@ class Signature:
         Returns:
             name of best-matched function
         """
-        t1 = time.time()
         sign_hash = Signature.hash(sign)
-        t2 = time.time()
-        print("time1 is ", t2 - t1)
         if sign_hash in self.matched:
             return self.matched[sign_hash]
 
@@ -337,14 +335,8 @@ class Signature:
 
         for i, func in enumerate(self.functions):
             print("Searching %s, Process: %%%f" % (func, float(i)/len(self.functions)*100))
-            # t3 = time.time()
             func_sign = self.get_sign(self.functions[func])
-            # t4 = time.time()
-            # print("get_sign time is ", t4 - t3)
-            # t5 = time.time()
             s = Signature.similarity(func_sign, sign)
-            # t6 = time.time()
-            # print("similarity time is ", t6 - t5)
             if s > score:
                 print('name', func, 'score is', s)
                 score = s

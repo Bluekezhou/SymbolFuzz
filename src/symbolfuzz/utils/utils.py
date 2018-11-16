@@ -4,22 +4,6 @@ import sys
 from triton import ARCH
 
 
-# Define basic exception class
-class UnsupportedArchException(Exception):
-    def __init__(self, arch):
-        Exception.__init__(self, "Architecture %s is not supported yet" % str(arch))
-
-
-class NotImplementedException(Exception):
-    def __init__(self, arch):
-        Exception.__init__(self, "Sorry, this part is not implemented yet")
-
-
-class UnknownEmulatorMode(Exception):
-    def __init__(self, arch):
-        Exception.__init__(self, "Unknown emulator mode " + str(arch))
-
-
 class LogUtil:
     __logger = None
     __log_handler = None
@@ -36,7 +20,7 @@ class LogUtil:
             cls.__logger = logging.getLogger(logger_name)
             cls.__log_handler = logging.StreamHandler(open(logfile, "a"))
 
-        cls.__logger.setLevel(logging.INFO)
+        cls.__logger.setLevel(logging.DEBUG)
 
         format_str = "[%(asctime)s file=%(filename)s line=%(lineno)d %(levelname)s] %(message)s"
         formatter = logging.Formatter(format_str)
@@ -122,7 +106,7 @@ def get_arch(elf):
         return ARCH.X86_64
 
 
-def connectPycharm(ip, port=4444):
+def connect_pycharm(ip, port=4444):
     """ Just for local debug """
     try:
         import sys

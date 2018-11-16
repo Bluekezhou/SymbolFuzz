@@ -8,8 +8,8 @@ Description: A class for symbolic solving
 """
 
 from pwn import *
-from emulator import *
-from debugger import *
+from symbolfuzz.core.emulator import *
+from symbolfuzz.core.debugger import *
 from copy import deepcopy
 
 

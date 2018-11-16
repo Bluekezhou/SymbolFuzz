@@ -8,14 +8,9 @@ Create By  : Bluecake
 
 from multiprocessing import Process, Queue, Semaphore
 from termcolor import colored
-from pwn import log, context
-from copy import deepcopy
-from emulator import *
 from guesser import *
 from solver import *
 from triton import *
-import string
-import gc
 import re
 import os
 

@@ -7,17 +7,20 @@ Create by  : Bluecake
 Description: Kernel class for x86 and x86_64 program emulate
 """
 
-from triton import TritonContext, ARCH, MemoryAccess, Instruction, MODE, CALLBACK, OPCODE
-from pwn import asm, context, ELF, process, pack
-from static import EmuConstant
-from syscall import *
-from utils import *
+from triton import TritonContext, MemoryAccess, Instruction, MODE, CALLBACK, OPCODE, ARCH
+from pwn import asm, context, ELF, process
+from symbolfuzz.utils.static import EmuConstant
+from symbolfuzz.utils.utils import LogUtil, get_arch, md5
+from symbolfuzz.libhook.libhook import AtoiHook, PutsHook
+from symbolfuzz.utils.recognizer import Recognizer
+from symbolfuzz.utils.exception import *
+from syscall import Syscall
+from basic import Basic
 import subprocess
 import json
 import tempfile
+import lief
 import os
-
-from basic import *
 
 
 class Emulator(Basic):
@@ -71,7 +74,7 @@ class Emulator(Basic):
     """
 
     def __init__(self, mode, arch=EmuConstant.UNKNOWN_ARCH, code="", assembly=None, code_start=-1,
-                 register=None, binary=None, dumpfile=None):
+                 register=None, binary=None, dumpfile=None, hook_library=None):
         """ Emulator Constructor Method
             Here we support two mode.
             MODE_ELF:  load code from .text segment of ELF binary file.
@@ -89,9 +92,9 @@ class Emulator(Basic):
             binary:     when mode is MODE_ELF, it's path of executable binary
             dumpfile:   path of memory snapshot file
         """
-        super(Emulator, self).__init__()
         self.mode = mode
         self.triton = TritonContext()
+        self.base = 0
         self.last_inst_type = OPCODE.JMP
         self.memory_cache = list()
         self.memAccessCheck = False
@@ -124,30 +127,23 @@ class Emulator(Basic):
 
             self.root_dir = os.path.dirname(__file__)
 
-            elf = ELF(binary)
-            self.arch = get_arch(elf)
-
-            self.assembly_cache_file = "/tmp/AssemblyCache.txt"
-            if os.path.exists(self.assembly_cache_file):
-                try:
-                    f = open(self.assembly_cache_file)
-                    self.assembly_cache = json.loads(f.read())
-
-                except Exception as e:
-                    log.debug(e)
-                    self.assembly_cache = {self.arch: {}}
-
-            else:
-                self.assembly_cache = {self.arch: {}}
-
+            self.elf = ELF(binary)
+            self.arch = get_arch(self.elf)
+            self.assembly_cache_file = None
+            self.assembly_cache = None
+            self.init_assembly_cache()
             self.init_with_binary()
-
+            if hook_library:
+                self.library_hook = {}
+                self.recognizer = Recognizer(self.binary)
+                self.load_hook_library(hook_library)
         else:
             raise UnknownEmulatorMode()
 
         self.read_count = 0
         self.last_pc = 0
         self.inst_count = 0
+        self.inst_loop = 0
 
         self.running = True
         self.syscall_fail = False
@@ -158,7 +154,6 @@ class Emulator(Basic):
         self.syshook.add_callback("write", self.callback_write)
         self.syshook.add_callback("exit", self.callback_exit)
         self.syshook.add_callback("exit_group", self.callback_exit)
-        self.syshook.add_callback("fstat64", self.callback_fstat64)
         self.syshook.add_callback("unsupported", self.callback_unsupported)
 
     def is_supported(self, arch):
@@ -208,7 +203,7 @@ class Emulator(Basic):
             if seed:
                 p.send(seed)
             cmd = "gdb -nx -command=%s --pid=%d" % (debug_file, p.pid)
-            log.info(cmd)
+            self.logger.info(cmd)
 
             # Run gdb and dump memory with patched peda
             subprocess.check_output(cmd, shell=True, stderr=None)
@@ -359,6 +354,12 @@ class Emulator(Basic):
         self.triton.concretizeMemory(mem)
         return self.triton.getConcreteMemoryValue(mem)
 
+    def get_machine_word(self, addr):
+        if self.arch == ARCH.X86:
+            return self.get_uint32(addr)
+        elif self.arch == ARCH.X86_64:
+            return self.get_uint64(addr)
+
     @staticmethod
     def asm(instruction, arch):
         if arch in EmuConstant.SUPPORT_ARCH:
@@ -388,7 +389,7 @@ class Emulator(Basic):
         else:
             return asm(code, arch=EmuConstant.SUPPORT_ARCH[self.arch])
 
-    def fake_process(self, code):
+    def instrument(self, code):
         asm_code = self.asm(code)
         instruction = Instruction()
         instruction.setOpcode(asm_code)
@@ -415,8 +416,12 @@ class Emulator(Basic):
             start = mem['start']
             end = mem['end']
             name = mem['name']
-            log.debug('Memory caching %x-%x' %(start, end))
+            self.logger.debug('Memory caching %x-%x' %(start, end))
             if mem['memory']:
+                if os.path.abspath(self.binary) in mem['name'] \
+                        and 'x' in mem['permissions'] and self.elf.pie:
+                    self.base = start
+
                 self.memory_cache.append({
                     'start':  start,
                     'size':   end - start,
@@ -434,7 +439,7 @@ class Emulator(Basic):
                 v = self.get_uint32(gs_8 + i*4)
                 write_gs = ['mov eax, %s' % hex(v), 'mov gs:[%d], eax' % (i*4)]
                 for inst in write_gs:
-                    self.fake_process(inst)
+                    self.instrument(inst)
 
         elif self.arch == ARCH.X86_64:
             context.arch = 'amd64'
@@ -446,13 +451,39 @@ class Emulator(Basic):
                 v = self.get_uint64(gs_8 + i*8)
                 write_gs = ['mov rax, %s' % hex(v), 'mov gs:[%d], rax' % (i*8)]
                 for inst in write_gs:
-                    self.fake_process(inst)
+                    self.instrument(inst)
 
         # Load registers into the triton
         self.logger.debug('Define registers')
         for reg, value in regs.items():
             self.logger.debug('Load register ' + reg)
             self.setreg(reg, value)
+
+    def load_hook_library(self, library, base=0):
+        """load library to memory cache
+
+        Args:
+            library: path of target library
+            base: forced base address of library
+        """
+        self.logger.debug("loading hooking library")
+        binary = lief.parse(library)
+        for s in binary.sections:
+            start = base + s.virtual_address
+            end = base + s.virtual_address + s.size
+            name = s.name
+            self.logger.debug('Memory caching %x-%x' % (start, end))
+            self.memory_cache.append({
+                'start':  start,
+                'size':   end - start,
+                'memory': "".join([chr(c) for c in s.content]),
+                'name': name
+            })
+
+        library_elf = ELF(library)
+        library_elf.address = base
+        self.add_library_call_hook("atoi", AtoiHook(self, library_elf))
+        self.add_library_call_hook("puts", PutsHook(self, library_elf))
 
     def memory_caching(self, triton, mem):
         """Callback: Speed up the procedure of load_dump"""
@@ -471,14 +502,14 @@ class Emulator(Basic):
                         return
 
         if self.memAccessCheck and not self.is_address(addr):
-            log.warn("Not stable, be careful to use memAccessCheck")
+            self.logger.warn("Not stable, be careful to use memAccessCheck")
             pc = self.getpc()
             self.memoryAccessError = (pc, addr)
             self.running = False
 
         return   
 
-    def checkAccess(self, switch):
+    def check_access(self, switch):
         """Switch to checking memory access address
 
         Args:
@@ -501,7 +532,7 @@ class Emulator(Basic):
                 return True
         return False 
 
-    def is_executable(self, pc):
+    def is_code(self, pc):
         """Check whether specific address has execute privilege
 
         Args:
@@ -519,7 +550,7 @@ class Emulator(Basic):
     def callback_read(self, fd, addr, length):
         """Callback for syscall read"""
         
-        log.debug('[callback_read] fd: %d, addr: %s, length: %d' % (fd, hex(addr), length))
+        self.logger.debug('[callback_read] fd: %d, addr: %s, length: %d' % (fd, hex(addr), length))
         if 'read_before' in self.callbacks:
             self.callbacks['read_before'](self, fd, addr, length)
             if not self.running:
@@ -532,11 +563,7 @@ class Emulator(Basic):
             self.running = False
             return 0
 
-        # read evreything from /dev/zero which is filled with 'A'
-        if hasattr(self, "dev_zero"):
-            content = 'A' * length
-
-        elif fd == 0:
+        if fd == 0:
 
             # hijack standard input
             if hasattr(self, 'stdin'):
@@ -567,14 +594,14 @@ class Emulator(Basic):
         else:
             content = os.read(fd,  length)
         
-        self.writeMemory(addr, content)
-        self.setreg('eax', len(content))
+        self.set_memory(addr, content)
+        self.setreg(EmuConstant.RegisterTable[self.arch]['ret_value'], len(content))
         
         if 'symbolize_check' in self.callbacks:
             check = self.callbacks['symbolize_check']
             for offset in range(len(content)):
                 if check(self, self.read_count + offset):
-                    log.debug("try to symbolize 0x%x, offset is %d" % (addr + offset, offset))
+                    self.logger.debug("try to symbolize 0x%x, offset is %d" % (addr + offset, offset))
                     mem = MemoryAccess(addr + offset, 1)
                     self.triton.convertMemoryToSymbolicVariable(mem)
 
@@ -582,7 +609,7 @@ class Emulator(Basic):
             check = self.callbacks['taint_check']
             for offset in range(len(content)):
                 if check(self, self.read_count + offset):
-                    log.debug("try to taint 0x%x, offset is %d" % (addr + offset, offset))
+                    self.logger.debug("try to taint 0x%x, offset is %d" % (addr + offset, offset))
                     self.triton.taintMemory(addr + offset)
 
         if 'read_after' in self.callbacks:
@@ -598,7 +625,7 @@ class Emulator(Basic):
             self.callbacks['write_before'](self, fd, addr, length)
 
         if not self.is_address(addr):
-            log.warn('[callback_write] Invalid target memory address ' + hex(addr))
+            self.logger.warn('[callback_write] Invalid target memory address ' + hex(addr))
         
         # Check fd, may cause other problem, but just do it.
         # Just because file-related syscalls are not supported yet.
@@ -615,7 +642,7 @@ class Emulator(Basic):
         if self.show_output:
             os.write(fd, content)
 
-        self.setreg('eax', len(content))
+        self.setreg(EmuConstant.RegisterTable[self.arch]['ret_value'], len(content))
 
         if 'write_after' in self.callbacks:
             self.callbacks['write_after'](self, fd, addr, length)
@@ -661,6 +688,19 @@ class Emulator(Basic):
         self.last_inst_type = OPCODE.JMP
         self.setpc(self.code_start)
 
+    def init_assembly_cache(self):
+        self.assembly_cache_file = "/tmp/AssemblyCache.txt"
+        if os.path.exists(self.assembly_cache_file):
+            try:
+                f = open(self.assembly_cache_file)
+                self.assembly_cache = json.loads(f.read())
+
+            except Exception as e:
+                self.logger.debug(e)
+                self.assembly_cache = {self.arch: {}}
+        else:
+            self.assembly_cache = {self.arch: {}}
+
     def init_with_binary(self):
         """Prepare everything before starting emulator"""
 
@@ -683,22 +723,25 @@ class Emulator(Basic):
 
         self.load_dump()
 
-    def getSyscallRegs(self):
+    def get_syscall_regs(self):
         """Retrieve args for syscall instruction
 
          Return:
-            If arch is x86, return eax, ebx, ecx, edx, edi, esi, ebp
+            If arch is x86, return eax, ebx, ecx, edx, esi, edi
+            If arch is x86_64, return rax, rbx, rcx, rdx, esi, edi
         """
         if self.arch == ARCH.X86:
-            reg_list = ["eax", "ebx", "ecx", "edx", "esi", "edi", "ebp"]
+            reg_list = ["eax", "ebx", "ecx", "edx", "esi", "edi"]
         elif self.arch == ARCH.X86_64:
-            reg_list = ["rax", "rbx", "rcx", "rdx", "rdi" "rsi", "r8", "r9",
-                        "r10", "r11", "r12", "r13", "r14", "r15"]
+            reg_list = ["rax", "rbx", "rcx", "rdx", "rsi" "rdi"]
 
         result = []
         for reg in reg_list:
-            result.append((reg, self.getreg(reg)))
-        return result
+            result.append(self.getreg(reg))
+
+        sysnum = result[0]
+        args = result[1:]
+        return sysnum, args
 
     def set_input(self, data):
         """Set input buffer
@@ -715,11 +758,11 @@ class Emulator(Basic):
     def symbolize_reg(self, reg):
         """ Symbolizing target register """
 
-        log.debug("try to symbolize " + reg)
+        self.logger.debug("try to symbolize " + reg)
         treg = eval("self.triton.registers." + reg)
         self.triton.convertRegisterToSymbolicVariable(treg)
     
-    def isRegisterSymbolized(self, reg):
+    def is_register_symbolized(self, reg):
         """ Check whether target register is symbolized
 
         Args:
@@ -728,10 +771,10 @@ class Emulator(Basic):
         Return:
             true, if target register is symbolized
         """
-        treg = eval("self.triton.registers." + reg)
-        return self.triton.isRegisterSymbolized(treg)
+        _reg = eval("self.triton.registers." + reg)
+        return self.triton.isRegisterSymbolized(_reg)
 
-    def isMemorySymbolized(self, addr):
+    def is_memory_symbolized(self, addr):
         """ Check whether target memory is symbolized
 
         Args:
@@ -742,7 +785,7 @@ class Emulator(Basic):
         """
         return self.triton.isMemorySymbolized(addr)
 
-    def isTainted(self, target):
+    def is_tainted(self, target):
         """ Check whether target data is tainted
 
         Args:
@@ -763,18 +806,6 @@ class Emulator(Basic):
 
         return False
 
-    def instrument(self, opcode):
-        if hasattr(self, 'inst'):
-            inst = self.inst
-        else:
-            inst = Instruction()
-            self.inst = inst
-
-        bincode = self.asm(opcode)
-        inst.setOpcode(bincode)
-        inst.setAddress(0)
-        self.triton.processing(inst)
-
     def check_dead_loop(self, *args):
         if self.getpc() == self.last_pc:
             self.inst_loop += 1
@@ -791,6 +822,9 @@ class Emulator(Basic):
     def add_after_process_callback(self, handler):
         self.after_process_callbacks.append(handler)
 
+    def add_library_call_hook(self, name, handler):
+        self.library_hook[name] = handler
+
     def process(self):
         """Emulate executing an instruction
 
@@ -804,8 +838,16 @@ class Emulator(Basic):
                 self.memoryAccessError = False
                 raise MemoryAccessException(pc, addr)
             return 0
-        
+
         pc = self.getpc()
+        if self.last_inst_type == OPCODE.CALL:
+            offset = pc - self.base
+            label = self.recognizer.get_label(offset)
+            if label is not None and label in self.library_hook:
+                print("function %s is called" % label)
+                self.library_hook[label].process()
+            pc = self.getpc()
+
         opcode = self.get_memory(pc, 16)
 
         instruction = Instruction()
@@ -825,18 +867,15 @@ class Emulator(Basic):
             if self.last_inst_type not in [OPCODE.SYSENTER, OPCODE.INT] \
                     and instruction.getType() in [OPCODE.SYSENTER, OPCODE.INT]:
 
-                sysnum, arg1, arg2, arg3, arg4, arg5, arg6 \
-                    = self.getSyscallRegs()
+                sysnum, args = self.get_syscall_regs()
                 
                 if 'syscall_before' in self.callbacks:
-                    self.callbacks['syscall_before'](self, sysnum, arg1, arg2, \
-                            arg3, arg4, arg5, arg6)
+                    self.callbacks['syscall_before'](self, sysnum, *args)
 
-                ret = self.syshook.syscall(sysnum, arg1, arg2, arg3, \
-                    arg4, arg5, arg6)
+                ret = self.syshook.syscall(sysnum, *args)
 
                 if 'syscall_after' in self.callbacks:
-                    self.callbacks['syscall_before'](ret)
+                    self.callbacks['syscall_after'](ret)
 
             self.setpc(pc + instruction.getSize())
 
@@ -844,6 +883,7 @@ class Emulator(Basic):
             self.logger.debug("Program stopped [call hlt]")
             self.running = False
             self.setpc(0)
+
 
         # Deal with instruction exception
         # elif instruction.getType() == OPCODE.RET \
@@ -889,33 +929,3 @@ class Emulator(Basic):
         for i in range(steps):
             result = self.process()
         return result
-
-
-class IllegalPcException(Exception):
-    def __init__(self, arch, pc):
-        if arch == 'x86':
-            Exception.__init__(self, "Eip address [0x%x] is illegal" % pc)
-        else:
-            raise UnsupportedArchException(arch)
-
-
-class IllegalInstException(Exception):
-    def __init__(self, arch, pc):
-        if arch == 'x86':
-            Exception.__init__(self, "Instruction at [0x%x] is illegal" % pc)
-        else:
-            raise UnsupportedArchException(arch)
-
-
-class InfinityLoopException(Exception):
-    def __init__(self, arch, pc):
-        if arch == 'x86':
-            Exception.__init__(self, "Encounter inifinity instruction at 0x%x" % pc)
-        else:
-            raise UnsupportedArchException(arch)
-
-
-class MemoryAccessException(Exception):
-    def __init__(self, pc, addr):
-        Exception.__init__(self, "Invalid memory [0x%x] access instruction at 0x%x" % (addr, pc))
-

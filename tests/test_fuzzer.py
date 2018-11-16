@@ -3,7 +3,7 @@
 
 import os
 from symbolfuzz import Fuzzer
-binary_dir = str(os.path.join(os.path.dirname(os.path.realpath(__file__)), '../binary/'))
+binary_dir = str(os.path.join(os.path.dirname(os.path.realpath(__file__)), '../example/binary/'))
 
 
 def test_atoi():
@@ -31,5 +31,5 @@ def test_sprintf_overflow():
 
 
 if __name__ == '__main__':
-    test_sprintf_overflow()
+    test_atoi()
     # test_one_byte_read()

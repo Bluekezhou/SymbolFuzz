@@ -17,7 +17,6 @@ def test_rep_movsd_x86():
     emulator.set_memory(0x2000, "b" * 50)
 
 
-
 def test_rep_movsd_x64():
      insts = "mov rcx, 5; mov rdi, 0x1000; mov rsi, 0x2000; rep movsd [rdi], [rsi]; mov rax, 0"
      emu = Debugger(EmuConstant.MODE_CODE, arch=ARCH.X86_64, code=insts, assembly=True, code_start=0x3000)

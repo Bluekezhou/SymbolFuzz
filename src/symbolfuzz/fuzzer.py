@@ -11,11 +11,8 @@ from multiprocessing import Queue
 from termcolor import colored
 from solver import *
 from triton import *
-import ctypes
 import random
 import shutil
-import gc
-import re
 
 
 class Fuzzer(object):
@@ -23,7 +20,6 @@ class Fuzzer(object):
 
     Attributes:
         binary: A string, path to executable binary file
-        guesser: A Guesser object, provide support for function analysis
         solver: A InputSolver object, provide support for contraints solving
         
         bin_root: A string, directory of executable binary file
@@ -52,16 +48,27 @@ class Fuzzer(object):
 
         tmp_bin = os.path.join(self.fuzz_dir, bin_name)
         if not os.path.exists(tmp_bin):
-            shutil.copy(binary, tmp_bin)
+            shutil.copy(binary_path, tmp_bin)
         self.binary = tmp_bin
 
         self.config_file = os.path.join(self.fuzz_dir, 'fuzz_record.txt')
-        # self.log_file = os.path.join(self.fuzz_dir, 'log.txt')
         self.timeout = 180
         self.running = True
         self.bridge = Queue()
         self.circle = 500    # seconds, can be longer
         self.cache_dir = ''
+
+        self.recognizer = Recognizer(self.binary)
+        self.solver = InputSolver(self.binary)
+
+        self.solve_record = {}
+        self.tried_seeds = []
+        self.seed_tree = {
+            '': {'father': '', 'path': 0},
+            'A': {'father': '', 'path': 0}
+        }
+        self.seeds = []
+        self.crash_seeds = []
 
         # if run with root, init ram disk
         if os.geteuid() == 0:
@@ -87,9 +94,10 @@ class Fuzzer(object):
         self.logger.info('Fuzzer save_state called')
 
         data1 = (self.solve_record, self.tried_seeds)
-        data2 = (self.seed_tree, self.atoi_solve)
+        data2 = self.seed_tree
         data3 = (self.seeds, self.crash_seeds)
-        open(self.config_file, 'wb').write(repr((data1, data2, data3)))
+        with open(self.config_file, "w") as f:
+            f.write(repr((data1, data2, data3)))
 
     def load_state(self):
         self.logger.info("Fuzzer load_state called")
@@ -98,46 +106,30 @@ class Fuzzer(object):
             data = open(self.config_file).read()
             data1, data2, data3 = eval(data)
             self.solve_record, self.tried_seeds = data1
-            self.seed_tree, self.atoi_solve = data2
+            self.seed_tree = data2
             self.seeds, self.crash_seeds = data3
-            if not self.seeds:
-                return False
 
-        else:
-            # data1
-            self.solve_record = {}
-            self.tried_seeds = []
-            # data2
-            self.seed_tree = {
-                '': {'father': '', 'path': 0},
-                'A': {'father': '', 'path': 0}
-            }
-            self.atoi_solve = {}
-            # data3
-            self.seeds = []
-            self.crash_seeds = []
-
-        return True
-
-    def isJmpInst(self, instType):
+    @staticmethod
+    def is_jmp_inst(inst_type):
         """Check whether a given instType is jmp type
         
         Args:
-            instType: inst type of instruction
+            inst_type: inst type of instruction
 
         Return:
             boolean, true or false
         """
 
-        if instType in [OPCODE.JA, OPCODE.JAE, OPCODE.JB, OPCODE.JBE, OPCODE.JE, 
-                    OPCODE.JG, OPCODE.JGE, OPCODE.JL, OPCODE.JLE, OPCODE.JNE, OPCODE.JNO, 
-                    OPCODE.JNP, OPCODE.JNS, OPCODE.JO, OPCODE.JP, OPCODE.JS]:
+        if inst_type in [OPCODE.JA, OPCODE.JAE, OPCODE.JB, OPCODE.JBE, OPCODE.JE,
+                         OPCODE.JG, OPCODE.JGE, OPCODE.JL, OPCODE.JLE, OPCODE.JNE, OPCODE.JNO,
+                         OPCODE.JNP, OPCODE.JNS, OPCODE.JO, OPCODE.JP, OPCODE.JS]:
             return True
 
         else:
             return False
 
-    def solveConstraint(self, emulator, constraint):
+    @staticmethod
+    def solve_constraint(emulator, constraint):
 
         try:
             models = emulator.triton.getModel(constraint)
@@ -154,7 +146,7 @@ class Fuzzer(object):
 
         return answer
     
-    def getDumpfile(self, seed):
+    def get_dumpfile(self, seed):
         binary = os.path.basename(self.binary)
         salt = md5(self.binary)
         seed_hash = md5(salt + seed, is_file=False)
@@ -164,11 +156,22 @@ class Fuzzer(object):
 
     def init_emulator(self, seed):
         base_seed = self.get_base(seed)
-        dumpfile_path = self.getDumpfile(base_seed)  
-        emulator = Debugger(EmuConstant.MODE_ELF, binary=self.binary, dumpfile=dumpfile_path)
+        dumpfile_path = self.get_dumpfile(base_seed)
+
+        script_root = os.path.dirname(__file__)
+        elf = ELF(self.binary)
+        arch = get_arch(elf)
+        if arch == ARCH.X86:
+            library = os.path.join(script_root, "libhook/libhook_x86.so")
+        elif arch == ARCH.X86_64:
+            library = os.path.join(script_root, "libhook/libhook_x64.so")
+        emulator = Debugger(EmuConstant.MODE_ELF, binary=self.binary,
+                            dumpfile=dumpfile_path, hook_library=library)
+
         emulator.show_inst = False
         emulator.show_output = False
         emulator.set_input(seed[len(base_seed):])
+
         return emulator
 
     def get_base(self, seed):
@@ -179,7 +182,6 @@ class Fuzzer(object):
 
     def set_base(self, seed, base_seed):
         self.seed_tree[seed]['father'] = base_seed
-        # self.seed_tree[seed]['path'] = self.get_path(base_seed)
 
     def add_seed(self, base_seed, new_seed, path):
         """ Add new seed to seed_tree """
@@ -206,23 +208,22 @@ class Fuzzer(object):
         """
         pcos = emulator.triton.getPathConstraints()
 
-        def detectConstantBranch():
+        def detect_constant_branch():
             if base_seed == '':
                 state = hash(tuple(path))
                 self.solve_record[state] = True
                 log.info('[1] Detect constant branch at %s with state %s' % (hex(emulator.getpc()), state))
 
         if not pcos:
-            detectConstantBranch()
+            detect_constant_branch()
             return None
 
         pco = pcos[-1]
         branches = pco.getBranchConstraints()
-        # log.info('There are %d branches at %s' % (len(branches), hex(emulator.last_pc)))
 
         for branch in branches:
             if branch['srcAddr'] != emulator.last_pc:
-                detectConstantBranch()
+                detect_constant_branch()
                 return None
 
             if branch['isTaken']:
@@ -247,158 +248,78 @@ class Fuzzer(object):
 
         return None
 
-    def explore_atoi(self, breakpoint, retaddr, seed):
+    @staticmethod
+    def explore_reg(emulator, reg, target):
+        """ Get input for target value
 
-        emulator = self.init_emulator(seed)
+        Args:
+            emulator: Emulator instance
+            reg:      register name
+            target:   target value
 
-        def read_before(emulator, fd, addr, length):
-            if emulator.stdin == '':
-                emulator.running = False
-
-        emulator.add_callback('read_before', read_before)
-        
-        breakaddr, inst_count = breakpoint
-        try:
-            while emulator.running:
-                if emulator.getpc() == breakaddr and emulator.inst_count == inst_count:
-                    while emulator.getpc() != retaddr:
-                        emulator.process()
-
-                    self.logger.info(colored('Start symbolizing atoi result register eax', 'green'))
-                    emulator.symbolize_reg('eax')
-
-                emulator.process()
-        except IllegalPcException as e:
-            log.warn(e)
-
-        except IllegalInstException as e:
-            log.warn(e)
-
-        result = []
-        
-        pco = emulator.triton.getPathConstraints()
-
-        for pc in pco:
-            if pc.isMultipleBranches():
-                branches = pc.getBranchConstraints()
-                for branch in branches:
-                    if not branch['isTaken']:
-                        models = emulator.triton.getModel(branch['constraint'])
-                        for k, v in models.items():
-                            result.append(v.getValue())
-        
-        return result
-
-    def explore_reg(self, emulator, reg):
-
-        initial_reg = emulator.getreg(reg)
-        log.info('current %s is %d' % (reg, initial_reg))
-        min = initial_reg
-        max = 0x1000
-
+        Returns:
+            answer if exits
+        """
         treg = eval('emulator.triton.registers.' + reg)
         reg_id = emulator.triton.getSymbolicRegisterId(treg)
         reg_sym = emulator.triton.getSymbolicExpressionFromId(reg_id)
         reg_ast = reg_sym.getAst()
 
+        ast_ctxt = emulator.triton.getAstContext()
+        constraints = list()
+        constraints.append(emulator.triton.getPathConstraintsAst())
+        bits = EmuConstant.bits[emulator.arch]
+        constraints.append(ast_ctxt.equal(reg_ast, ast_ctxt.bv(target, bits)))
+        cstr = ast_ctxt.land(constraints)
+        model = emulator.triton.getModel(cstr)
         new_input = {}
-        while min < max:
-            # print min, max
-
-            medium = (min + max) / 2
-            astCtxt = emulator.triton.getAstContext()
-            constraints = list()
-            constraints.append(emulator.triton.getPathConstraintsAst())
-            constraints.append(astCtxt.equal(reg_ast, astCtxt.bv(medium, 32)))
-            cstr = astCtxt.land(constraints)
-            model = emulator.triton.getModel(cstr)
-            new_input = {}
-            for k, v in model.items():
-                log.debug(v)
-                index = int(v.getName().replace('SymVar_', ''))
-                new_input[index] = chr(v.getValue())
-
-            if new_input:
-                # min can be bigger
-                min = medium
-            else:
-                # max s too big, just be smaller
-                max = medium
-
-            if min == max - 1:
-                if min > initial_reg:
-                    log.info('find a bigger read length input ' + str(min))
-                    return new_input
-                break
+        for k, v in model.items():
+            log.debug(v)
+            index = int(v.getName().replace('SymVar_', ''))
+            new_input[index] = chr(v.getValue())
 
         return new_input
     
-    def gen_atoi_seeds(self, emulator, seed, ptr, length, retvs):
-        values = []
-        for r in retvs:
-            r = ctypes.c_int32(r).value
-            values.append(str(r).ljust(10, 'A'))
-
-        # Generate some random seeds for atoi
-        for i in range(1, 10):
-            v = random.randint(10**(i-1), 10**i)
-            values.append(str(v).ljust(10, 'A'))
-
-        v = random.randint(10**8, 10**9)
-        values.append(str(v * -1))
-        
-        values = list(set([v[:length] for v in values]))
-        log.info('fuzz atoi ' + repr(values))
-
-        dst = range(ptr, ptr + length)
-        breakpoint = (emulator.getpc(), emulator.inst_count)
-        self.solver.set_breakpoint(breakpoint)
-        base_seed = self.get_base(seed)
-        dumpfile = self.getDumpfile(base_seed)
-        self.solver.set_dumpfile(dumpfile)
-        self.solver.set_input(emulator.true_read, emulator.read_count)
-        answer = self.solver.solveMemoryList(dst, values)
-        
-        result = []
-        base_seed = self.get_base(seed)
-        for ans in answer:
-            new_seed = base_seed + self.solver.createInput(ans)
-            log.info('[2] Get new seed %s' % repr(new_seed))
-            result.append(new_seed)
-
-        return result
-
     def explore(self, seed='A'):
-        """ explore the program with seed and give new seeds
+        """ explore the program with seed and generate new seeds
         
         Args:
             seed: initial input of the program
+
+        Return:
+            new seeds for new branches
         """
         emulator = self.init_emulator(seed)
 
-        def is_symbolize(emulator, offset):
+        def is_symbolize(_emulator, offset):
+            """ Switch for input symbolize """
             return True
         
-        def read_before(emulator, fd, addr, length):
-            if emulator.stdin == '':
-                emulator.running = False
-                emulator.try_read = length 
+        def read_before(_emulator, fd, addr, length):
+            """ Record expected read length """
+            if fd == 0:
+                """ standard input """
+                if _emulator.stdin == '':
+                    _emulator.running = False
+                    _emulator.try_read = length
+                else:
+                    _emulator.last_read_length = length
+                    _emulator.try_read = 0
             else:
-                emulator.last_read_length = length
-                emulator.try_read = 0
+                raise NotImplementedException()
 
-        def read_after(emulator, content):
-            """ Deal with input filled with 'A' or any other data """
+        def read_after(_emulator, content):
+            """ Monitor all received data """
 
             if hasattr(emulator, 'true_read'):
-                emulator.true_read += content
+                _emulator.true_read += content
             else:
-                emulator.true_read = content
+                _emulator.true_read = content
 
-            emulator.sys_read = True
+            _emulator.sys_read = True
 
-        def syscall_before(emulator, *args):
-            emulator.sys_read = False
+        def syscall_before(_emulator, *args):
+            _emulator.sys_read = False
 
         emulator.add_callback('symbolize_check', is_symbolize) 
         emulator.add_callback('read_before', read_before)
@@ -408,17 +329,16 @@ class Fuzzer(object):
         result = []
         base_seed = self.get_base(seed)
         path = [self.get_path(base_seed)]
-        log.info('base_seed is ' + repr(base_seed))
-        log.debug('base_path is ' + repr(path))
+        self.logger.info('base_seed is ' + repr(base_seed))
+        self.logger.debug('base_path is ' + repr(path))
         
         try:
             while emulator.running:
-                if self.isJmpInst(emulator.last_inst_type):
-                    # log.info('Detect branch at %s' % hex(emulator.getpc()))
-
-                    if emulator.sys_read:
-                        path = [hash(tuple(path))]
-                        emulator.sys_read = False
+                if Fuzzer.is_jmp_inst(emulator.last_inst_type):
+                    # if emulator.sys_read:
+                    #     """ read operation is important so add it to path """
+                    #     path = [hash(tuple(path))]
+                    #     emulator.sys_read = False
 
                     path.append(emulator.getpc())
                     state = hash(tuple(path))
@@ -427,78 +347,19 @@ class Fuzzer(object):
                         if answer:
                             self.solver.set_input(emulator.true_read, emulator.read_count)
                             new_seed = base_seed + self.solver.createInput(answer)
-                            log.info('[1] Get new seed %s' % repr(new_seed))
+                            self.logger.info('[1] Get new seed %s' % repr(new_seed))
                             self.add_seed(base_seed, new_seed, path)
                             result.append(new_seed)
 
                         elif base_seed != '':
                             # Since there are some unsolvable branches, I put it back
                             # to new seeds again
-                            log.info('[1] Find branch unsolvable %s with state %s' %
+                            self.logger.info('[1] Find branch unsolvable %s with state %s' %
                                      (hex(emulator.getpc()), state))
                             self.set_base(seed, '')
                             res = self.explore(seed)
                             result.extend(res)
                             return result
-
-                elif emulator.last_inst_type == OPCODE.CALL:
-                    # log.info('guessing function at ' + hex(emulator.last_pc))
-                    if self.guesser.guessFunc(emulator.getpc()) == FUNCTYPE.FUNC_atoi:
-                        state = hash(tuple(path))
-
-                        esp = emulator.getreg('esp')
-                        buf_ptr = emulator.getuint32(esp + 4)
-                        atoi_arg = emulator.getMemoryString(buf_ptr)[:8]
-
-                        count = 0
-                        for i in range(emulator.read_count):
-                            # print emulator.isMemorySymbolized(buf_ptr + i)
-                            if not emulator.isMemorySymbolized(buf_ptr + i):
-                                break
-                            count += 1
-                        # print count
-                        retaddr = self.guesser.func_info[emulator.getpc()][1]
-                        log.info('[%s] atoi arg is %s' %
-                                 (hex(emulator.last_pc), repr(atoi_arg)))
-
-                        if state not in self.atoi_solve:
-                            if count > 0:
-                                self.atoi_solve[state] = True
-
-                                breakpoint = (emulator.getpc(), emulator.inst_count)
-                                atoi_result = self.explore_atoi(breakpoint, retaddr, seed)
-                                log.info('good atoi result is ' + repr(atoi_result))
-                                
-                                seeds = self.gen_atoi_seeds(emulator, seed, buf_ptr, count, atoi_result) 
-                                for _seed in seeds:
-                                    result.append(_seed)
-                                    self.add_seed(base_seed, _seed, path)
-
-                            elif base_seed != '':
-                                # It's possible that atoi args is not controllabe. There is no easy way 
-                                # to judge whether it's args is from user input or constant strings.
-                                # A simpler way is downgrade its base_seed and put it back to seeds.
-                                log.info('Detect atoi args uncontrolale, may lost symbol information')
-                                self.set_base(seed, self.get_base(base_seed))
-                                result.append(seed)
-                                return result
-
-                        else:
-                            log.info('Current atoi branch has been explored, state is %s' % state)
-
-                        # Here we do some check with atoi input. If not starts with
-                        # a minus or a number, I think it's not a good input.
-                        pattern = re.compile(r'^-?[0-9]+.*')
-                        match = pattern.match(atoi_arg)
-                        if not match:  
-                            self.tried_seeds.append(hash(seed))
-                            log.info(colored('Discarding bad input of atoi', 'yellow'))
-                            return result
-
-                        while emulator.running and emulator.getpc() != retaddr:
-                            # Since we have dealed with atoi input and output, 
-                            # we don't need to explore atoi inner branches anymore.
-                            emulator.process()
 
                 emulator.process()
 
@@ -511,58 +372,62 @@ class Fuzzer(object):
             self.crash_seeds.append(seed)
 
         if emulator.try_read > 0:
-            if emulator.isRegisterSymbolized('edx'):
-                log.info('find controllable read length')
-                ans = self.explore_reg(emulator, 'edx')
-                if ans:
-                    self.solver.set_input(emulator.true_read, emulator.read_count)
-                    new_seed = base_seed + self.solver.createInput(ans)
-                    log.info('[4] Get interesting seed %s' % repr(new_seed))
-                    self.add_seed(seed, new_seed, path)
-                    result.append(new_seed)
+            syscall_arg3_reg = EmuConstant.RegisterTable[emulator.arch]['syscall_arg3']
+            if emulator.is_register_symbolized(syscall_arg3_reg):
+                self.logger.info('find controllable read length')
+                current_value = emulator.getreg(syscall_arg3_reg)
+                for i in range(10):
+                    ans = self.explore_reg(emulator, syscall_arg3_reg, current_value + 2**i)
+                    if ans:
+                        self.solver.set_input(emulator.true_read, emulator.read_count)
+                        new_seed = base_seed + self.solver.createInput(ans)
+                        self.logger.info('[4] Get interesting seed %s' % repr(new_seed))
+                        self.add_seed(seed, new_seed, path)
+                        result.append(new_seed)
 
             new_seed = seed + 'A' * emulator.try_read
-            log.info('[3] Get new seed %s' % repr(new_seed))
+            self.logger.info('[3] Get new seed %s' % repr(new_seed))
             result.append(new_seed)
             
-            def check2exp(num):
-                for i in range(20):
-                    if num == 2**i:
+            def align_check(num):
+                for p in range(20):
+                    if num == 2**p:
                         return True
                 return False
 
             # Think about such situation: A program read only one bytes in a loop 
-            # until '\n' is encountered or any other condition. If we create too
+            # until '\n' is encountered or any other condition. If we create those
             # new base_seeds, it will occupy a huge disk space. So when such scene
             # happened, we make it aligned to powers of 2.
-            if emulator.try_read == 1 and check2exp(len(new_seed)):
-                log.info('[1] add_seed, new seed is %s' % repr(new_seed))
-                self.add_seed(seed, new_seed, path)
-            else:
+            if emulator.try_read == 1:
+                if align_check(len(new_seed)):
+                    self.logger.info('[1] add_seed, new seed is %s' % repr(new_seed))
+                    self.add_seed(seed, new_seed, path)
+            elif emulator.try_read > 1:
                 log.info('[2] add_seed, new seed is %s' % repr(new_seed))
                 self.add_seed(seed, new_seed, path)
 
             # create inputs from generated seeds
-            random_seeds = []
-            for i in range(10):
-                index = random.randint(0, len(result) - 1)
-                random_seeds.append(result[index])
-
-            random_space = ''.join(list(set(random_seeds)))
-            
-            fuzz_seeds = []
-            for i in range(3):
-                new_seed = ''
-                for _ in range(max(0x10, emulator.try_read)):
-                    new_seed += random_space[random.randint(0, len(random_space) - 1)]
-                fuzz_seeds.append(new_seed)
-
-            fuzz_seeds = list(set(fuzz_seeds))
-            for fuzz_seed in fuzz_seeds: 
-                new_seed = seed + fuzz_seed
-                result.append(new_seed)
-                log.info('[5] Get new seed %s' % repr(new_seed))
-                self.add_seed(seed, new_seed, path)
+            # random_seeds = []
+            # for i in range(10):
+            #     index = random.randint(0, len(result) - 1)
+            #     random_seeds.append(result[index])
+            #
+            # random_space = ''.join(list(set(random_seeds)))
+            #
+            # fuzz_seeds = []
+            # for i in range(3):
+            #     new_seed = ''
+            #     for _ in range(max(0x10, emulator.try_read)):
+            #         new_seed += random_space[random.randint(0, len(random_space) - 1)]
+            #     fuzz_seeds.append(new_seed)
+            #
+            # fuzz_seeds = list(set(fuzz_seeds))
+            # for fuzz_seed in fuzz_seeds:
+            #     new_seed = seed + fuzz_seed
+            #     result.append(new_seed)
+            #     log.info('[5] Get new seed %s' % repr(new_seed))
+            #     self.add_seed(seed, new_seed, path)
                 
         elif seed not in self.tried_seeds:
             log.info(colored('The program finished normally with current seed, no more fuzzing', 'green'))
@@ -571,43 +436,34 @@ class Fuzzer(object):
         return result
 
     def process_fuzz(self):
-        gc.disable()
-        # if self.logv:
-        #     context.log_level = self.logv
-        # context.log_level = "WARN"
-        
-        if not self.load_state():
-            return
-
-        self.guesser = Guesser(self.binary)
-        self.solver = InputSolver(self.binary)
+        self.load_state()
 
         if not self.seeds:
             seeds = [('', 0)]
         else:
-            seeds = sorted(self.seeds, key=lambda v: v[1])
+            seeds = sorted(self.seeds, key=lambda s: s[1])
 
         start = int(time.time())
         count = 0
         while seeds:
             new_seeds = []
             for _ in range(len(seeds)):
-                log.info('current seeds has %d items' % len(seeds))
+                self.logger.info('current seeds has %d items' % len(seeds))
                 if count % 10 == 0:
                     index = random.randint(0, len(seeds))
                 else:
                     index = 0
                 
-                log.info('random seed index is %d' % index)
+                self.logger.info('random seed index is %d' % index)
                 seed, level = seeds.pop(0)
 
                 if hash(seed) in self.tried_seeds:
-                    log.info(colored('Discarding duplicate seed', 'green'))
+                    self.logger.info(colored('Discarding duplicate seed', 'green'))
                     continue
 
                 count += 1
-                log.info('seed count is %d' % count)
-                log.info('try seed: %s, level is %d' % (repr(seed), level))
+                self.logger.info('seed count is %d' % count)
+                self.logger.info('try seed: %s, level is %d' % (repr(seed), level))
                 result = self.explore(seed)
                 if result:
                     # log.info('result ' + repr(result))
@@ -627,11 +483,10 @@ class Fuzzer(object):
                     sys.exit()
             
             seeds = [(v, level+1) for v in set(new_seeds)]
-            log.debug('seeds ' + repr(seeds))
-            self.guesser.save_state()
+            self.logger.debug('seeds ' + repr(seeds))
             self.solver.save_state()
             if self.crash_seeds:
-                log.warn(colored(str(self.crash_seeds), "red"))
+                self.logger.warn(colored(str(self.crash_seeds), "red"))
 
         self.bridge.put(False)
 
@@ -646,14 +501,9 @@ class Fuzzer(object):
             return 
 
         try:
-            self.running = True
+            self.running = True  # can altered at any time
             for i in range(self.circle):  # about 6 hours
-                if self.running:
-                    # p = Process(target=self.process_fuzz)
-                    # p.start()
-                    # p.join()
-                    # self.running = self.bridge.get()
-                    self.process_fuzz()
+                self.process_fuzz()
 
         except KeyboardInterrupt:
             sys.exit()
@@ -664,10 +514,3 @@ class Fuzzer(object):
     def get_crash(self):
         self.load_state()
         return self.crash_seeds
-
-
-if __name__ == '__main__':
-    binary = sys.argv[1]
-    fuzzer = Fuzzer(binary)
-    fuzzer.fuzz()
-
