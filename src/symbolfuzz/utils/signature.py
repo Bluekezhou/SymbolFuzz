@@ -8,8 +8,8 @@ Description: A class to get function signature
 """
 
 from capstone import Cs, CS_ARCH_X86, CS_MODE_32, CS_MODE_64
-from symbolfuzz.utils.utils import get_arch, md5, LogUtil
-from symbolfuzz.utils.exception import *
+from utils import get_arch, md5, LogUtil, getELF
+from exception import *
 import os
 import json
 from pwn import ELF
@@ -30,7 +30,7 @@ class Signature:
         """
         self.logger = LogUtil.get_logger()
         self.executable = executable
-        self.elf = ELF(executable)
+        self.elf = getELF(executable)
         self.arch = get_arch(self.elf)
 
         self.functions = {}

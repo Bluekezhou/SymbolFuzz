@@ -1,11 +1,9 @@
 #!/usr/bin/env python
 # coding=utf-8
 
-import os
-import shutil
 from fuzzer import *
-from pwn import context
 import threading
+
 
 class SymbolFuzzer:
     

@@ -67,7 +67,7 @@ class Syscall(Basic):
 
     def syscall_read(self, fd, addr, length, *args): 
 
-        self.logger.debug('[SYS_read] fd: %d, addr: 0x%x, length: %x' % (fd, addr, length))
+        self.logger.debug('[SYS_read] fd: %d, addr: 0x%x, length: %d' % (fd, addr, length))
         if 'read' in self.callbacks:
             return self.callbacks['read'](fd, addr, length)
         else:

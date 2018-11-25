@@ -14,7 +14,7 @@ def test_libhook():
     binary = os.path.join(binary_dir, "atoi")
     hooklib = os.path.join(library_dir, "libhook_x86.so")
     debugger = Debugger(EmuConstant.MODE_ELF, binary=binary, hook_library=hooklib)
-    debugger.set_input("-1")
+    debugger.set_input("127")
     debugger.debug()
 
 

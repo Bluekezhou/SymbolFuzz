@@ -57,3 +57,25 @@ class PrintfHook(LibHook):
 
     def process(self, format_str):
         pass
+
+
+class StackCheckFailHook(LibHook):
+    """Library hooker for function puts
+
+    """
+    def __init__(self, emulator, hook_library):
+        super(StackCheckFailHook, self).__init__(emulator, hook_library)
+
+    def process(self):
+        self.emulator.setpc(0xdeadbeaf)
+
+
+class StrcmpHook(LibHook):
+    """Library hooker for function puts
+
+    """
+    def __init__(self, emulator, hook_library):
+        super(StrcmpHook, self).__init__(emulator, hook_library)
+
+    def process(self):
+        self.emulator.setpc(self.hook_library.symbols['strcmp_hook'])

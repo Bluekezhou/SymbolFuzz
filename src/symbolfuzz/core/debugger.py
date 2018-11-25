@@ -184,7 +184,13 @@ class NextInstruction(Command):
               "    ni"
         print(msg)
 
-    def execute(self, steps=1):
+    def execute(self, steps="1"):
+        try:
+            steps = int(steps)
+        except ValueError:
+            print("Error occurs when parse steps")
+            return
+
         for i in range(steps):
             pc = self.debugger.process()
             if self.debugger.last_inst_type == OPCODE.CALL:
@@ -216,12 +222,17 @@ class StepInstruction(Command):
               "    si"
         print(msg)
 
-    def execute(self, steps=-1):
+    def execute(self, steps="1"):
+        try:
+            steps = int(steps)
+        except ValueError:
+            print("Error occurs when parse steps")
+            return
+
         if steps > 0:
             result = None
-            for i in range(steps):
-                result = self.debugger.process()
-        else:
+
+        for _ in range(steps):
             result = self.debugger.process()
 
         return result
@@ -305,13 +316,13 @@ class Show(Command):
         return True
 
 
-class Register(Command):
+class ShowRegister(Command):
     """command register
 
     Function: show information for register, equal to command "show register"
     """
     def __init__(self, debugger):
-        super(Register, self).__init__(debugger, "register", min_args=0, max_args=1)
+        super(ShowRegister, self).__init__(debugger, "register", min_args=0, max_args=1)
         self.alias = "reg"
         self._description = "show register information"
 
@@ -398,6 +409,10 @@ class Xinfo(Command):
 
     def execute(self, address, option='-hex', length=1):
         address = str2int(address)
+        if not address:
+            print("Wrong format")
+            return False
+
         if option in ['-s', '-string']:
             self.xinfo(address, 'string')
         elif option in ['-h', '-hex']:
@@ -442,7 +457,7 @@ class Debugger(Emulator):
         self.register_command(ContinueRun(self))
         self.register_command(Show(self))
         self.register_command(Xinfo(self))
-        self.register_command(Register(self))
+        self.register_command(ShowRegister(self))
         self.register_command(Stack(self))
         self.register_command(Disasm(self))
         self.register_command(Help(self))
@@ -497,7 +512,7 @@ class Debugger(Emulator):
 
     """ self-defined function for command show stack """
     def show_stack(self, size=10):
-        print('-'* 25 + '   stack  ' + '-'*25)
+        print('-' * 25 + '   stack  ' + '-'*25)
         if self.arch == ARCH.X86:
             esp = self.getreg('esp')
             for i in range(size):
@@ -512,6 +527,9 @@ class Debugger(Emulator):
 
         else:
             raise UnsupportedArchException(self.arch)
+
+        print(self.get_memory_string(0xffc4ea3e))
+        debug = 1
 
     """ self-defined function for command show code """
     def show_code(self, pc, lines=5):

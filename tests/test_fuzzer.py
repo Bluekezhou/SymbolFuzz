@@ -7,7 +7,7 @@ binary_dir = str(os.path.join(os.path.dirname(os.path.realpath(__file__)), '../e
 
 
 def test_atoi():
-    atoi_binary = os.path.join(binary_dir, 'atoi')
+    atoi_binary = os.path.join(binary_dir, 'atoi3')
     fuzzer = Fuzzer(atoi_binary)
     fuzzer.fuzz()
 
@@ -32,4 +32,4 @@ def test_sprintf_overflow():
 
 if __name__ == '__main__':
     test_atoi()
-    # test_one_byte_read()
+    # test_strlen()

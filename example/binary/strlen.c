@@ -13,7 +13,7 @@ int main()
 
     char buffer[100];
     read(0, buffer, length);
-    if(strlen(buffer) == 17)
+    if(strcmp(buffer, "strlen is easy") == 0)
     {
         printf("Woo !!!");
         read(0, buf, 1024); 

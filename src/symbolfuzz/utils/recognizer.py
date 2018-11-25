@@ -10,13 +10,14 @@ Description: A class to recognize library function
 from pwn import ELF
 import os
 from symbolfuzz.utils.signature import Signature
+from utils import getELF
 
 
 class Recognizer(object):
 
     def __init__(self, binary):
         self.binary = binary
-        self.elf = ELF(binary)
+        self.elf = getELF(binary)
         self.address_info = {}
         if self.is_static():
             self.lib_sign = None

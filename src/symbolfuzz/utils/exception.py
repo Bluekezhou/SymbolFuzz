@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # coding=utf-8
 
+from symbolfuzz.utils.static import EmuConstant
+
 
 # Define basic exception class
 class UnsupportedArchException(Exception):
@@ -20,8 +22,8 @@ class UnknownEmulatorMode(Exception):
 
 class IllegalPcException(Exception):
     def __init__(self, arch, pc):
-        if arch == 'x86':
-            Exception.__init__(self, "Eip address [0x%x] is illegal" % pc)
+        if arch in EmuConstant.SUPPORT_ARCH:
+            Exception.__init__(self, "PC address [0x%x] is illegal" % pc)
         else:
             raise UnsupportedArchException(arch)
 
@@ -35,11 +37,8 @@ class IllegalInstException(Exception):
 
 
 class InfinityLoopException(Exception):
-    def __init__(self, arch, pc):
-        if arch == 'x86':
-            Exception.__init__(self, "Encounter inifinity instruction at 0x%x" % pc)
-        else:
-            raise UnsupportedArchException(arch)
+    def __init__(self, pc):
+        Exception.__init__(self, "Encounter inifinity instruction at 0x%x" % pc)
 
 
 class MemoryAccessException(Exception):

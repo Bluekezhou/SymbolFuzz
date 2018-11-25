@@ -2,6 +2,7 @@ import logging
 import hashlib
 import sys
 from triton import ARCH
+from pwn import ELF
 
 
 class LogUtil:
@@ -20,9 +21,9 @@ class LogUtil:
             cls.__logger = logging.getLogger(logger_name)
             cls.__log_handler = logging.StreamHandler(open(logfile, "a"))
 
-        cls.__logger.setLevel(logging.DEBUG)
+        cls.__logger.setLevel(logging.INFO)
 
-        format_str = "[%(asctime)s file=%(filename)s line=%(lineno)d %(levelname)s] %(message)s"
+        format_str = "[file=%(filename)s line=%(lineno)d %(levelname)s] %(message)s"
         formatter = logging.Formatter(format_str)
         cls.__log_handler.setFormatter(formatter)
         cls.__logger.addHandler(cls.__log_handler)
@@ -48,20 +49,39 @@ def title(msg, obj=None, length=70, fill='='):
         print obj
 
 
-def memorize(f):
+def memorize(isclazz=False):
     cached = {}
 
-    def helper(*args, **kargs):
+    def wrapper(func):
+        def inner_wrapper(*args, **kargs):
+            if isclazz:
+                _args = args[1:]
+            else:
+                _args = args
 
-        key = (args, tuple(kargs.values()))
-        if key not in cached:
-            cached[key] = f(*args, **kargs)
-        return cached[key]
+            if len(_args) == 1:
+                _args = _args[0]
 
-    return helper
+            _key = []
+            if _args:
+                _key.append(_args)
+
+            if kargs:
+                _key.append(tuple(kargs.values()))
+
+            if len(_key) == 1:
+                key = _key[0]
+            else:
+                key = tuple(_key)
+
+            if key not in cached:
+                cached[key] = func(*args, **kargs)
+            return cached[key]
+        return inner_wrapper
+    return wrapper
 
 
-@memorize
+@memorize(isclazz=False)
 def md5(stream, is_file=True):
     """ Generate md5 for file or string """
     md5 = hashlib.md5()
@@ -75,6 +95,11 @@ def md5(stream, is_file=True):
     return md5.hexdigest()
 
 
+@memorize(isclazz=False)
+def getELF(binpath):
+    return ELF(binpath)
+
+
 def str2int(data):
     """Try to transform a string to an integer
 
@@ -85,10 +110,14 @@ def str2int(data):
     Returns:
         an integer
     """
-    try:
-        return int(data, 16)
-    except ValueError:
-        return int(data, 10)
+    metrics = [16, 10]
+    result = None
+    for metric in metrics:
+        try:
+            return int(data, metric)
+        except ValueError:
+            pass
+    return None
 
 
 def get_arch(elf):
